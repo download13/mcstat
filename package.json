@@ -1,0 +1,13 @@
+{
+	"name": "mcstat",
+	"description": "Get status of minecraft servers",
+	"version": "0.0.0",
+	"author": {
+		"name": "Erin Dachtler <download333@gmail.com>"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/download13/mcstat.git"
+	},
+	"main": "mcstat.js"
+}
