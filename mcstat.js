@@ -1,123 +1,145 @@
+var domain = require('domain');
 var net = require('net');
+var once = require('once');
+var async = require('async');
 
-var PING = new Buffer([0xfe, 0x01]);
-var PING_1_6 = new Buffer([0xfa, 0x00, 0x0b, 0, 0x4D, 0, 0x43, 0, 0x7C, 0, 0x50, 0, 0x69, 0, 0x6E, 0, 0x67, 0, 0x48, 0, 0x6F, 0, 0x73, 0, 0x74]);
-var TIMEOUT = 1 * 1000;
+
+var askers = [
+	require('./lib/askers/1_7'),
+	require('./lib/askers/1_6'),
+	require('./lib/askers/1_4')
+];
+var askerLookup = {
+	'1_7': askers[0],
+	'1_6': askers[1],
+	'1_4': askers[2]
+};
+
+var parsers = [
+	require('./lib/parsers/1_7'),
+	require('./lib/parsers/1_6'),
+	require('./lib/parsers/1_4'),
+	require('./lib/parsers/pre_1_4')
+];
+
+
 var TRY_LIMIT = 3;
-var PROTOCOL_VERSION = 73;
+var TIMEOUT = 10 * 1000;
 
-function ping_1_6_ext(version, addr, port) {
-	binaddr = invertEndianness(Buffer(addr, 'ucs2'));
-	var arr = num2arr(7 + binaddr.length, 2);
-	arr.push(version);
-	arr = arr.concat(num2arr(addr.length, 2));
-	arr = Buffer.concat([Buffer(arr), binaddr, Buffer(num2arr(port, 4))]);
-	return arr;
-}
 
-function num2arr(n, bytes) {
-	var r = [];
-	for(var i = bytes - 1; i >= 0; i--) {
-		var p = i * 8;
-		r.push((n >> p) & 255);
+exports.getStatus = function(addr, port, opts, cb) {
+	if(typeof opts === 'function') {
+		cb = opts;
+		opts = {};
 	}
-	return r;
-}
 
-function invertEndianness(b) {
-	for(var i = 0; i < b.length; i += 2) {
-		var t = b[i];
-		b[i] = b[i + 1];
-		b[i + 1] = t;
-	}
-	return b;
-}
-function stripSpecial(s) {
-	var pos;
-	while((pos = s.indexOf('\xa7')) != -1) {
-		s = s.substr(0, pos) + s.substr(pos + 2);
-	}
-	return s;
-}
-
-function validIP(addr) {
-	if(typeof addr != 'string') return false;
-	if(addr.match(/[^\d.]/) != null) return false;
-	var segs = addr.trim().split('.');
-	if(segs.length != 4) return false;
-	return segs.every(function(v) {
-		v = parseInt(v);
-		return !isNaN(v) && v >= 0 && v < 256;
-	});
-}
-function validDomain(addr) {
-	if(typeof addr != 'string') return false;
-	if(addr.match(/:/) != null) return false;
-	var parts = addr.trim().split('.');
-	if(parts.length < 2) return false;
-	return parts.every(function(v) {
-		return v.length > 0 && v[0].match(/[0-9:]/) == null;
-	});
-}
-
-exports.getStatus = function(addr, port, cb, tries) {
-	tries = tries || 0;
-	if(tries > TRY_LIMIT) return cb(new Error('Max tries exceeded'));
-	if(cb == null) {
-		cb = port;
-		port = 25565;
-	}
-	if(isNaN(port) || port > 65535 || port < 0) port = 25565;
-	if(!(validIP(addr) || validDomain(addr))) return cb();
+	cb = once(cb);
 	addr = addr.trim();
-	
-	var conn = net.connect({host: addr, port: port}, function() {
-		conn.setNoDelay(true);
-		conn.write(PING);
-		conn.write(PING_1_6);
-		conn.write(ping_1_6_ext(PROTOCOL_VERSION, addr, port));
-	});
-	conn.setTimeout(TIMEOUT, function() {
-		conn.destroy();
-		exports.getStatus(addr, port, cb, tries + 1);
-	});
-	conn.on('error', function(err) {
-		conn.destroy();
-		cb && cb(err);
-		cb = null;
-	});
-	conn.on('readable', function() {
-		var data = conn.read();
-		if(data == null) {
-			return conn.destroy();
+
+	var a = askers.slice(), lastError;
+	if(opts.asker) {
+		a = [askerLookup[opts.asker]];
+	}
+
+	async.until(function() {
+		return a.length === 0;
+	}, function(cb) {
+		attempt(a.pop(), addr, port, function(err, info) {
+			if(err) {
+				lastError = err;
+			}
+
+			cb(info);
+		});
+	}, function(info) {
+		if(info) {
+			cb(null, info);
+		} else {
+			cb(new Error('Unable to get server info: ' + lastError.message));
 		}
-		if(data[0] != 0xff) {
+	});
+}
+
+
+function attempt(asker, addr, port, cb) {
+	var t = setTimeout(function() {
+		if(conn) {
 			conn.destroy();
-			cb && cb(new Error('Kicked by server'));
-			cb = null;
+		}
+
+		cb(new Error('Timed out'));
+	}, TIMEOUT);
+
+	var conn = net.connect(port, addr);
+	conn.setNoDelay(true);
+
+	conn.on('error', function(err) {
+		clearTimeout(t);
+
+		conn.destroy();
+
+		errorHandler(cb, err);
+	});
+
+	conn.once('data', function(data) {
+		clearTimeout(t);
+
+		conn.end();
+		conn.destroy();
+
+		var result;
+		parsers.some(function(parser) {
+			try {
+				result = parser(data);
+				return true;
+			} catch(e) {
+				return false;
+			}
+		});
+
+		if(!result) {
+			cb(new Error('Unable to parse server response'));
 			return;
 		}
-		data = data.slice(3);
-		invertEndianness(data)
-		data = data.toString('ucs2');
-		//console.log(data);
-		data = data.split('\x00');
-		if(data.length > 3) {
-			data = data.slice(2);
-		}
-		var info = {};
-		if(data.length > 3) {
-			info.version = data.shift();
-		}
-		info.motd = data[0];
-		info.players = parseInt(data[1]);
-		info.slots = parseInt(data[2]);
-		//console.log(info);
-		
-		info.motd = stripSpecial(info.motd).trim();
-		
-		conn.destroy();
-		cb && cb(null, info);
-		cb = null;
+
+		cb(null, result);
 	});
+
+	asker(conn, addr, port);
+}
+
+
+function errorHandler(cb, err) {
+	if(err.name === 'RangeError') {
+		cb(new Error('Invalid port: ' + port));
+		return;
+	}
+
+	switch(err.code) {
+	case 'ENOENT':
+		cb(new Error('Invalid port value'));
+		return;
+
+	case 'ENOTFOUND':
+		cb(new Error('Unable to resolve domain'));
+		return;
+
+	case 'ETIMEDOUT':
+		cb(new Error('Connection timed out'));
+		return;
+
+	case 'ECONNREFUSED':
+		cb(new Error('Connection refused'));
+		return;
+
+	case 'ECONNRESET':
+		cb(new Error('Connection reset by server'));
+		return;
+
+	case undefined:
+		cb(err);
+		return;
+	}
+
+	throw err;
 }
