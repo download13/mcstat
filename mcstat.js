@@ -4,6 +4,8 @@ var once = require('once');
 var async = require('async');
 
 
+var TIMEOUT = 10 * 1000;
+
 var askers = [
 	require('./lib/askers/1_7'),
 	require('./lib/askers/1_6'),
@@ -21,10 +23,6 @@ var parsers = [
 	require('./lib/parsers/1_4'),
 	require('./lib/parsers/pre_1_4')
 ];
-
-
-var TRY_LIMIT = 3;
-var TIMEOUT = 10 * 1000;
 
 
 exports.getStatus = function(addr, port, opts, cb) {
@@ -115,30 +113,42 @@ function errorHandler(cb, err) {
 		return;
 	}
 
+	var m;
+
 	switch(err.code) {
 	case 'ENOENT':
-		cb(new Error('Invalid port value'));
-		return;
+		m = 'Invalid port value';
+		break;
 
 	case 'ENOTFOUND':
-		cb(new Error('Unable to resolve domain'));
-		return;
+		m = 'Unable to resolve domain';
+		break;
 
 	case 'ETIMEDOUT':
-		cb(new Error('Connection timed out'));
-		return;
+		m = 'Connection timed out';
+		break;
 
 	case 'ECONNREFUSED':
-		cb(new Error('Connection refused'));
-		return;
+		m = 'Connection refused';
+		break;
 
 	case 'ECONNRESET':
-		cb(new Error('Connection reset by server'));
-		return;
+		m = 'Connection reset by server';
+		break;
+
+	case 'EHOSTUNREACH':
+		m = 'Host unreachable';
+		break;
 
 	case undefined:
 		cb(err);
 		return;
+	}
+
+	if(m != null) {
+		var e = new Error(m);
+		e.code = err.code;
+		cb(e);
 	}
 
 	throw err;
