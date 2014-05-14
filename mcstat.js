@@ -149,6 +149,7 @@ function errorHandler(cb, err) {
 		var e = new Error(m);
 		e.code = err.code;
 		cb(e);
+		return;
 	}
 
 	throw err;
